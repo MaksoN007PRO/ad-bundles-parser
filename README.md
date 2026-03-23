@@ -1,8 +1,8 @@
-# Versions of monitoring components for Arenadata bundles
+# Versions of Arenadata Bundles Components
 
 ## 📌 Описание
 
-Веб-приложение на базе **Streamlit**, представляющее собой инструмент для отображения версий компонентов мониторинга, входящих в bundle-архивы Arenadata.
+Веб-приложение на базе **Streamlit**, представляющее собой инструмент для отображения версий компонентов бандлов Arenadata.
 
 Приложение:
 
