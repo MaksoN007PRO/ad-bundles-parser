@@ -1,9 +1,7 @@
-version: "3.9"
-
 services:
   app:
     build: .
-    container_name: ad-bundles-monitoring-parser
+    container_name: ad-bundles-parser
 
     ports:
       - "8501:8501"

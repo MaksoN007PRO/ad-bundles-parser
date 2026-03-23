@@ -38,7 +38,7 @@ session.headers.update({
     "Connection": "close"
 })
 
-VERSION_RE = re.compile(r"\d+\.\d+(?:\.\d+)?")
+VERSION_RE = re.compile(r"\d+(?:\.\d+)+")
 
 # ---------------- CACHE ----------------
 
@@ -53,16 +53,14 @@ def save_cache(cache):
     with open(CACHE_FILE, "w") as f:
         json.dump(cache, f, indent=4)
 
-
-# ---------------- COMMON ----------------
+# ---------------- TAR ----------------
 
 def open_tar_from_url(url):
     r = session.get(url, timeout=60)
     r.raise_for_status()
     return tarfile.open(fileobj=io.BytesIO(r.content), mode="r:gz")
 
-
-# ---------------- VERSION CLEAN ----------------
+# ---------------- VERSION ----------------
 
 def clean_version(v):
     if not v:
@@ -70,8 +68,6 @@ def clean_version(v):
     m = VERSION_RE.search(str(v))
     return m.group(0) if m else None
 
-
-# ---------------- VERSION PARSER ----------------
 
 def extract_version(product, name):
     patterns = {
@@ -90,8 +86,7 @@ def extract_version(product, name):
 
     return ".".join(m.groups())
 
-
-# ---------------- BUNDLE LIST ----------------
+# ---------------- BUNDLES ----------------
 
 def get_bundles(url, product):
     r = session.get(url, timeout=30)
@@ -108,8 +103,6 @@ def get_bundles(url, product):
 
     return bundles
 
-
-# ---------------- VERSION MAP ----------------
 
 def build_version_map(product, bundles):
     version_map = {}
@@ -128,7 +121,6 @@ def build_version_map(product, bundles):
         reverse=True
     )[:MAX_VERSIONS_PER_PRODUCT])
 
-
 # ---------------- PARSERS ----------------
 
 def parse_et_mon(url):
@@ -136,7 +128,6 @@ def parse_et_mon(url):
 
     with open_tar_from_url(url) as tar:
         for member in tar:
-
             if member.issym() or member.islnk():
                 continue
 
@@ -149,9 +140,7 @@ def parse_et_mon(url):
 
             data = yaml.load(f.read(), Loader=Loader)
 
-            images = data.get("images", [])
-
-            for img in images:
+            for img in data.get("images", []):
                 if "grafana" in img:
                     result["grafana"] = img.split(":")[1].split("-")[0]
                 if "graphite" in img:
@@ -217,8 +206,6 @@ def parse_prom(url):
                     except:
                         pass
 
-    # ---------- prototype fallback ----------
-
     if prototype_text:
         prom = re.search(r"prometheus:.*?default: '([^']+)'", prototype_text, re.S)
         graf = re.search(r"grafana:.*?default: '([^']+)'", prototype_text, re.S)
@@ -233,8 +220,6 @@ def parse_prom(url):
             result["pushgateway"] = push.group(1)
         if node and not result["node_exporter"]:
             result["node_exporter"] = node.group(1)
-
-    # ---------- wanted_packages fallback ----------
 
     def walk_yaml(node):
         if isinstance(node, list):
@@ -263,19 +248,62 @@ def parse_prom(url):
 
     return result
 
+# ---------------- ADCM ----------------
 
-# ---------------- BUNDLE PROCESSOR ----------------
+def parse_adcm_min_version(url):
+    try:
+        with open_tar_from_url(url) as tar:
+            for member in tar:
+
+                if member.issym() or member.islnk():
+                    continue
+
+                name = member.name.lower()
+
+                if not (name.endswith("config.yaml") or name.endswith("config.yml")):
+                    continue
+
+                f = tar.extractfile(member)
+                if not f:
+                    continue
+
+                raw = f.read()
+
+                try:
+                    data = yaml.load(raw, Loader=Loader)
+                    if isinstance(data, dict):
+                        v = data.get("adcm_min_version")
+                        if v:
+                            return clean_version(v)
+                except:
+                    pass
+
+                text = raw.decode(errors="ignore")
+                m = re.search(r"adcm_min_version:\s*([0-9\.]+)", text)
+                if m:
+                    return clean_version(m.group(1))
+
+    except Exception as e:
+        print("ADCM error:", url, e)
+
+    return None
+
+# ---------------- PROCESS ----------------
 
 def process_bundle(product, version, bundle):
     try:
         parser = parse_et_mon if product in ["ET", "Monitoring"] else parse_prom
-        return product, version, parser(bundle)
+        data = parser(bundle) or {}
+
+        data["adcm_min_version"] = parse_adcm_min_version(bundle)
+
+        return product, version, data
+
     except Exception as e:
         print("parse error", bundle, e)
         return product, version, None
 
-
-# ---------------- UPDATE CACHE ----------------
+# ---------------- CACHE UPDATE ----------------
 
 def update_cache():
     cache = load_cache()
@@ -303,7 +331,6 @@ def update_cache():
     save_cache(cache)
     return cache
 
-
 # ---------------- STREAMLIT ----------------
 
 st.title("Versions of monitoring components for Arenadata bundles")
@@ -319,13 +346,18 @@ if st.button("Refresh cache"):
     cache = update_cache()
     st.success("Cache updated")
 
-tab1, tab2 = st.tabs(["ET / Monitoring", "ADB / ADQM / ADH / ADS / ADPG"])
+tab1, tab2, tab3 = st.tabs([
+    "ADCM Minimal Version",
+    "ET / Monitoring",
+    "ADB / ADQM / ADH / ADS / ADPG"
+])
 
 TABS = {
-    tab1: GROUPS["ET / Monitoring"],
-    tab2: GROUPS["ADB / ADQM / ADH / ADS / ADPG"],
+    tab2: GROUPS["ET / Monitoring"],
+    tab3: GROUPS["ADB / ADQM / ADH / ADS / ADPG"],
 }
 
+# --- ET/MON AND PRODUCTS TABS ---
 for tab, products in TABS.items():
     with tab:
         for product in products:
@@ -339,6 +371,34 @@ for tab, products in TABS.items():
 
             df = pd.DataFrame.from_dict(data, orient="index")
             df.index.name = "Version"
+
+            df = df[[c for c in df.columns if c != "adcm_min_version"]]
+            df = df.dropna(how="all")
             df = df.sort_index(ascending=False)
 
             st.dataframe(df, width="stretch")
+
+# --- ADCM TAB ---
+with tab1:
+    st.header("ADCM Minimal Version")
+
+    for product in PRODUCT_URLS:
+        st.subheader(product)
+
+        data = cache.get(product, {})
+
+        rows = [
+            {"Version": v, "adcm_min_version": d.get("adcm_min_version")}
+            for v, d in data.items()
+        ]
+
+        df = pd.DataFrame(rows)
+
+        if not df.empty:
+            df = df.sort_values(
+                by="Version",
+                key=lambda col: col.map(lambda v: [int(x) for x in str(v).split(".")]),
+                ascending=False
+            ).reset_index(drop=True)
+
+        st.dataframe(df, width="stretch", hide_index=True)
